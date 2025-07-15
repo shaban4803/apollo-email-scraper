@@ -1,0 +1,109 @@
+import time
+import re
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from bs4 import BeautifulSoup
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+# ---------- CONFIG ----------
+BASE_URL = "https://app.apollo.io/#/people?finderViewId=your_list_id_here"
+DELAY_BETWEEN_PAGES = 5  # seconds
+MAX_PAGES = 100
+# ---------------------------
+
+# Setup Chrome
+options = Options()
+options.add_argument("--start-maximized")
+driver = webdriver.Chrome(options=options)
+
+# Open Apollo
+driver.get(BASE_URL)
+print("Please log in to Apollo manually if not logged in...")
+
+# Wait until the total count appears
+WebDriverWait(driver, 300).until(lambda d: "of" in d.page_source)
+time.sleep(5)  # extra wait for full load
+
+# Get total contacts
+page_text = driver.page_source
+match = re.search(r'of\s([\d,]+)', page_text)
+total_contacts = int(match.group(1).replace(",", "")) if match else 0
+print(f"Total contacts found: {total_contacts}")
+
+pages = min(MAX_PAGES, (total_contacts + 24) // 25)
+print(f"Total pages to scrape: {pages}")
+
+all_rows = []
+
+def clean_text(text):
+    text = re.sub(r'[^a-zA-Z0-9\s,.@\-+()]', '', text)
+    text = text.replace("Â", '').strip()
+    return text
+
+def extract_table():
+    html = driver.page_source
+    soup = BeautifulSoup(html, 'html.parser')
+    table = soup.find('table')
+    if not table:
+        return []
+
+    headers = []
+    data = []
+
+    for i, row in enumerate(table.find_all('tr')):
+        cells = row.find_all(['th', 'td'])
+        row_data = [clean_text(cell.get_text()) for cell in cells]
+
+        # Identify and store headers
+        if i == 0:
+            headers = row_data
+            continue
+
+        data.append(row_data)
+
+    return headers, data
+
+# Loop through all pages
+for i in range(1, pages + 1):
+    page_url = re.sub(r"&page=\d+", "", BASE_URL) + f"&page={i}"
+    print(f"Scraping page {i}...")
+    driver.get(page_url)
+
+    # Wait for table to load
+    try:
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.TAG_NAME, "table"))
+        )
+    except:
+        print(f"Timeout on page {i}")
+        continue
+
+    headers, rows = extract_table()
+    all_rows.extend(rows)
+    time.sleep(DELAY_BETWEEN_PAGES)
+
+driver.quit()
+
+# Split Name column if exists
+if "Name" in headers:
+    name_index = headers.index("Name")
+    new_headers = headers[:name_index] + ["First Name", "Last Name", "Full Name"] + headers[name_index + 1:]
+    updated_rows = []
+    for row in all_rows:
+        name = row[name_index]
+        parts = name.split()
+        first = parts[0] if parts else ''
+        last = ' '.join(parts[1:]) if len(parts) > 1 else ''
+        updated_row = row[:name_index] + [first, last, name] + row[name_index + 1:]
+        updated_rows.append(updated_row)
+else:
+    new_headers = headers
+    updated_rows = all_rows
+
+# Save to CSV
+df = pd.DataFrame(updated_rows, columns=new_headers)
+df.to_csv("apollo_contacts.csv", index=False, encoding='utf-8-sig')
+print("Saved to apollo_contacts.csv")
